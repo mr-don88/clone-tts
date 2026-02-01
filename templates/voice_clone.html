@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clone Giọng Nói</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .tab {
+            overflow: hidden;
+            border: 1px solid #ccc;
+            background-color: #f1f1f1;
+            border-radius: 5px 5px 0 0;
+        }
+        .tab button {
+            background-color: inherit;
+            float: left;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            padding: 14px 16px;
+            transition: 0.3s;
+        }
+        .tab button:hover {
+            background-color: #ddd;
+        }
+        .tab button.active {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .tabcontent {
+            display: none;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 5px 5px;
+        }
+        .upload-form {
+            border: 2px dashed #ccc;
+            padding: 30px;
+            text-align: center;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        .btn-secondary {
+            background-color: #008CBA;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin: 10px 0;
+            padding: 10px;
+        }
+        select {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .voice-item {
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin: 5px 0;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .voice-item:hover {
+            background-color: #f0f0f0;
+        }
+        .voice-item.selected {
+            background-color: #4CAF50;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>Clone Giọng Nói AI</h1>
+    
+    <div class="tab">
+        <button class="tablink" onclick="openTab(event, 'extract')" id="defaultOpen">Trích xuất Giọng</button>
+        <button class="tablink" onclick="openTab(event, 'clone')">Clone Giọng</button>
+        <button class="tablink" onclick="openTab(event, 'stt')">Speech to Text</button>
+        <button class="tablink" onclick="openTab(event, 'tts')">Text to Speech</button>
+    </div>
+    
+    <!-- Tab 1: Trích xuất giọng -->
+    <div id="extract" class="tabcontent">
+        <h3>Trích xuất Giọng Nói từ Audio</h3>
+        <p>Tải lên file audio chứa giọng nói bạn muốn clone</p>
+        
+        <form id="extractForm" class="upload-form">
+            <input type="file" id="voiceFile" accept=".mp3,.wav,.m4a" required>
+            <br><br>
+            <button type="submit" class="btn">Trích xuất Giọng</button>
+        </form>
+        
+        <div id="extractResult"></div>
+    </div>
+    
+    <!-- Tab 2: Clone giọng -->
+    <div id="clone" class="tabcontent">
+        <h3>Clone Giọng Nói</h3>
+        <p>Tạo giọng nói mới từ văn bản bằng giọng đã lưu</p>
+        
+        <div id="voiceList">
+            <p>Đang tải danh sách giọng...</p>
+        </div>
+        
+        <textarea id="cloneText" placeholder="Nhập văn bản bạn muốn chuyển thành giọng nói..."></textarea>
+        <br>
+        <button onclick="cloneVoice()" class="btn">Tạo Giọng Clone</button>
+        
+        <div id="cloneResult"></div>
+    </div>
+    
+    <!-- Tab 3: Speech to Text -->
+    <div id="stt" class="tabcontent">
+        <h3>Chuyển đổi Speech to Text</h3>
+        <p>Chuyển giọng nói thành văn bản</p>
+        
+        <form id="sttForm" class="upload-form">
+            <input type="file" id="sttFile" accept="audio/*" required>
+            <br><br>
+            <button type="submit" class="btn">Chuyển đổi</button>
+        </form>
+        
+        <div id="sttResult"></div>
+    </div>
+    
+    <!-- Tab 4: Text to Speech -->
+    <div id="tts" class="tabcontent">
+        <h3>Chuyển đổi Text to Speech</h3>
+        <p>Chuyển văn bản thành giọng nói</p>
+        
+        <textarea id="ttsText" placeholder="Nhập văn bản..."></textarea>
+        <br>
+        <button onclick="textToSpeech()" class="btn">Tạo Audio</button>
+        
+        <div id="ttsResult"></div>
+    </div>
+    
+    <script>
+        // Tab management
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tablink");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
+        }
+        document.getElementById("defaultOpen").click();
+        
+        // Load danh sách giọng
+        loadVoices();
+        
+        // Form trích xuất giọng
+        document.getElementById('extractForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('voiceFile');
+            const resultDiv = document.getElementById('extractResult');
+            
+            if (!fileInput.files.length) {
+                showResult(resultDiv, 'Vui lòng chọn file audio!', 'error');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            try {
+                showResult(resultDiv, 'Đang trích xuất giọng...', 'info');
+                
+                const response = await fetch('/api/extract-voice', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(resultDiv, `
+                        <strong>✓ Trích xuất thành công!</strong><br>
+                        Giọng: ${data.voice_name}<br>
+                        ID: ${data.voice_id}<br>
+                        <button class="btn btn-secondary" onclick="loadVoices()">
+                            Tải lại danh sách giọng
+                        </button>
+                    `, 'success');
+                } else {
+                    showResult(resultDiv, `<strong>✗ Lỗi:</strong> ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(resultDiv, `<strong>✗ Lỗi kết nối:</strong> ${error.message}`, 'error');
+            }
+        });
+        
+        // Load danh sách giọng
+        async function loadVoices() {
+            const voiceListDiv = document.getElementById('voiceList');
+            
+            try {
+                const response = await fetch('/api/voices');
+                const data = await response.json();
+                
+                if (response.ok && data.voices.length > 0) {
+                    let html = '<h4>Chọn giọng nói:</h4>';
+                    data.voices.forEach(voice => {
+                        html += `
+                            <div class="voice-item" onclick="selectVoice('${voice.id}', this)">
+                                ${voice.name}
+                            </div>
+                        `;
+                    });
+                    voiceListDiv.innerHTML = html;
+                    
+                    // Chọn voice đầu tiên
+                    if (data.voices.length > 0) {
+                        selectVoice(data.voices[0].id, 
+                            voiceListDiv.getElementsByClassName('voice-item')[0]);
+                    }
+                } else {
+                    voiceListDiv.innerHTML = '<p>Chưa có giọng nào được lưu. Hãy trích xuất giọng trước.</p>';
+                }
+            } catch (error) {
+                voiceListDiv.innerHTML = `<p>Lỗi khi tải danh sách: ${error.message}</p>`;
+            }
+        }
+        
+        let selectedVoiceId = '';
+        
+        function selectVoice(voiceId, element) {
+            selectedVoiceId = voiceId;
+            
+            // Xóa tất cả selected class
+            const items = document.getElementsByClassName('voice-item');
+            for (let item of items) {
+                item.classList.remove('selected');
+            }
+            
+            // Thêm selected class cho item được chọn
+            element.classList.add('selected');
+        }
+        
+        // Clone giọng
+        async function cloneVoice() {
+            const text = document.getElementById('cloneText').value;
+            const resultDiv = document.getElementById('cloneResult');
+            
+            if (!text.trim()) {
+                showResult(resultDiv, 'Vui lòng nhập văn bản!', 'error');
+                return;
+            }
+            
+            if (!selectedVoiceId) {
+                showResult(resultDiv, 'Vui lòng chọn giọng nói!', 'error');
+                return;
+            }
+            
+            try {
+                showResult(resultDiv, 'Đang tạo giọng clone...', 'info');
+                
+                const response = await fetch('/api/clone-voice', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        voice_id: selectedVoiceId
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(resultDiv, `
+                        <strong>✓ Tạo thành công!</strong><br>
+                        <audio controls style="width: 100%; margin: 10px 0;">
+                            <source src="${data.audio_url}" type="audio/mpeg">
+                        </audio>
+                        <br>
+                        <a href="${data.audio_url}" class="btn" download>
+                            Tải xuống Audio
+                        </a>
+                    `, 'success');
+                } else {
+                    showResult(resultDiv, `<strong>✗ Lỗi:</strong> ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(resultDiv, `<strong>✗ Lỗi kết nối:</strong> ${error.message}`, 'error');
+            }
+        }
+        
+        // Speech to Text
+        document.getElementById('sttForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('sttFile');
+            const resultDiv = document.getElementById('sttResult');
+            
+            if (!fileInput.files.length) {
+                showResult(resultDiv, 'Vui lòng chọn file audio!', 'error');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            try {
+                showResult(resultDiv, 'Đang chuyển đổi...', 'info');
+                
+                const response = await fetch('/api/speech-to-text', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(resultDiv, `
+                        <strong>✓ Chuyển đổi thành công!</strong><br>
+                        <textarea readonly style="width: 100%; height: 100px; margin: 10px 0;">
+                            ${data.text}
+                        </textarea>
+                    `, 'success');
+                } else {
+                    showResult(resultDiv, `<strong>✗ Lỗi:</strong> ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(resultDiv, `<strong>✗ Lỗi kết nối:</strong> ${error.message}`, 'error');
+            }
+        });
+        
+        // Text to Speech
+        async function textToSpeech() {
+            const text = document.getElementById('ttsText').value;
+            const resultDiv = document.getElementById('ttsResult');
+            
+            if (!text.trim()) {
+                showResult(resultDiv, 'Vui lòng nhập văn bản!', 'error');
+                return;
+            }
+            
+            try {
+                showResult(resultDiv, 'Đang tạo audio...', 'info');
+                
+                const response = await fetch('/api/text-to-speech', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        text: text
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(resultDiv, `
+                        <strong>✓ Tạo thành công!</strong><br>
+                        <audio controls style="width: 100%; margin: 10px 0;">
+                            <source src="${data.audio_url}" type="audio/mpeg">
+                        </audio>
+                        <br>
+                        <a href="${data.audio_url}" class="btn" download>
+                            Tải xuống Audio
+                        </a>
+                    `, 'success');
+                } else {
+                    showResult(resultDiv, `<strong>✗ Lỗi:</strong> ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showResult(resultDiv, `<strong>✗ Lỗi kết nối:</strong> ${error.message}`, 'error');
+            }
+        }
+        
+        function showResult(element, message, type) {
+            element.innerHTML = message;
+            element.className = type;
+            element.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
