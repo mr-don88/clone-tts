@@ -15,6 +15,8 @@ from pydub import AudioSegment
 import io
 import librosa
 import tempfile
+import requests
+from typing import Optional, Dict, List
 
 # Cấu hình logging
 logging.basicConfig(level=logging.INFO)
@@ -23,25 +25,25 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Cấu hình
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = 'temp'
 app.config['OUTPUT_FOLDER'] = 'outputs'
 app.config['VOICE_CLONE_FOLDER'] = 'voices'
 app.config['MODEL_FOLDER'] = 'models'
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# Tạo thư mục nếu chưa tồn tại
+# Tạo thư mục
 for folder in [app.config['UPLOAD_FOLDER'], app.config['OUTPUT_FOLDER'], 
                app.config['VOICE_CLONE_FOLDER'], app.config['MODEL_FOLDER'],
                'static/css', 'static/js', 'templates']:
     Path(folder).mkdir(parents=True, exist_ok=True)
 
 # Khởi tạo models
-tts_model = None
+tts_models: Dict[str, TTS] = {}
 whisper_model = None
 
 def get_device():
-    """Xác định device (CUDA/CPU)"""
+    """Xác định device"""
     if torch.cuda.is_available():
         return "cuda"
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -49,45 +51,128 @@ def get_device():
     else:
         return "cpu"
 
-def load_tts_model():
-    """Load TTS model - sử dụng model nhẹ hơn"""
-    global tts_model
-    if tts_model is None:
+def load_tts_model(model_name: str = "tts_models/vi/vivos/vits"):
+    """Load TTS model cụ thể"""
+    try:
+        if model_name in tts_models:
+            return tts_models[model_name]
+        
+        logger.info(f"Đang load TTS model: {model_name}")
+        device = get_device()
+        
+        # Load model với các tham số tối ưu
+        tts_model = TTS(
+            model_name=model_name,
+            progress_bar=False,
+            gpu=True if device == "cuda" else False
+        )
+        
+        tts_models[model_name] = tts_model
+        logger.info(f"Model {model_name} đã được load trên {device}")
+        return tts_model
+        
+    except Exception as e:
+        logger.error(f"Lỗi khi load model {model_name}: {str(e)}")
+        return None
+
+def load_all_tts_models():
+    """Load tất cả các model TTS có sẵn"""
+    models_to_load = [
+        # Model Tiếng Việt
+        "tts_models/vi/vivos/vits",  # Giọng Tiếng Việt chất lượng cao
+        "tts_models/vi/viettts/female",  # Giọng nữ Tiếng Việt
+        "tts_models/vi/viettts/male",    # Giọng nam Tiếng Việt
+        
+        # Model đa ngôn ngữ với voice cloning
+        "tts_models/multilingual/multi-dataset/xtts_v2",  # XTTS v2 - voice cloning tốt
+        
+        # Model Tiếng Anh (có thể đọc Tiếng Việt với accent)
+        "tts_models/en/ljspeech/tacotron2-DDC",
+        "tts_models/en/ljspeech/glow-tts",
+        "tts_models/en/ljspeech/speedy-speech",
+    ]
+    
+    loaded_models = {}
+    for model_name in models_to_load:
         try:
-            logger.info("Đang load TTS model...")
-            device = get_device()
-            
-            # Sử dụng model nhẹ hơn để tránh lỗi
-            # Tacotron2 là model ổn định và nhẹ
-            tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC",
-                          progress_bar=False,
-                          gpu=True if device == "cuda" else False)
-            logger.info(f"TTS model đã được load trên {device}")
+            model = load_tts_model(model_name)
+            if model:
+                loaded_models[model_name] = model
         except Exception as e:
-            logger.error(f"Lỗi khi load TTS model: {str(e)}")
-            # Fallback: sử dụng gTTS
-            tts_model = "gtts"
-    return tts_model
+            logger.warning(f"Không thể load model {model_name}: {e}")
+    
+    return loaded_models
 
 def load_whisper_model():
-    """Load Whisper model cho speech recognition"""
+    """Load Whisper model"""
     global whisper_model
     if whisper_model is None:
         try:
             logger.info("Đang load Whisper model...")
             device = get_device()
-            # Sử dụng model tiny để tiết kiệm bộ nhớ
-            whisper_model = whisper.load_model("tiny", device=device)
+            whisper_model = whisper.load_model("base", device=device)
             logger.info(f"Whisper model đã được load trên {device}")
         except Exception as e:
             logger.error(f"Lỗi khi load Whisper model: {str(e)}")
             whisper_model = None
     return whisper_model
 
-# Danh sách các định dạng file được phép
+# Danh sách các định dạng file
 ALLOWED_EXTENSIONS = {
-    'audio': ['mp3', 'wav', 'ogg', 'm4a'],
-    'voice_clone': ['mp3', 'wav', 'm4a']
+    'audio': ['mp3', 'wav', 'ogg', 'm4a', 'flac'],
+    'voice_clone': ['mp3', 'wav', 'm4a', 'ogg']
+}
+
+# Danh sách các giọng có sẵn
+AVAILABLE_VOICES = {
+    'vi_female_vivos': {
+        'id': 'vi_female_vivos',
+        'name': 'Giọng Nữ Việt Nam (VIVOS)',
+        'model': 'tts_models/vi/vivos/vits',
+        'language': 'vi',
+        'gender': 'female',
+        'description': 'Giọng nữ Tiếng Việt tự nhiên, chất lượng cao'
+    },
+    'vi_female_viettts': {
+        'id': 'vi_female_viettts',
+        'name': 'Giọng Nữ Việt Nam (VietTTS)',
+        'model': 'tts_models/vi/viettts/female',
+        'language': 'vi',
+        'gender': 'female',
+        'description': 'Giọng nữ Tiếng Việt từ VietTTS'
+    },
+    'vi_male_viettts': {
+        'id': 'vi_male_viettts',
+        'name': 'Giọng Nam Việt Nam (VietTTS)',
+        'model': 'tts_models/vi/viettts/male',
+        'language': 'vi',
+        'gender': 'male',
+        'description': 'Giọng nam Tiếng Việt từ VietTTS'
+    },
+    'xtts_v2_vietnamese': {
+        'id': 'xtts_v2_vietnamese',
+        'name': 'XTTS v2 - Tiếng Việt',
+        'model': 'tts_models/multilingual/multi-dataset/xtts_v2',
+        'language': 'vi',
+        'gender': 'neutral',
+        'description': 'Model đa ngôn ngữ với hỗ trợ Tiếng Việt, có thể clone giọng'
+    },
+    'en_female_tacotron': {
+        'id': 'en_female_tacotron',
+        'name': 'Giọng Nữ Anh Mỹ',
+        'model': 'tts_models/en/ljspeech/tacotron2-DDC',
+        'language': 'en',
+        'gender': 'female',
+        'description': 'Giọng nữ Tiếng Anh Mỹ'
+    },
+    'en_male_glow': {
+        'id': 'en_male_glow',
+        'name': 'Giọng Nam Anh Mỹ',
+        'model': 'tts_models/en/ljspeech/glow-tts',
+        'language': 'en',
+        'gender': 'male',
+        'description': 'Giọng nam Tiếng Anh Mỹ'
+    }
 }
 
 def allowed_file(filename, file_type='audio'):
@@ -98,55 +183,17 @@ def allowed_file(filename, file_type='audio'):
     return ext in ALLOWED_EXTENSIONS.get(file_type, [])
 
 def convert_audio_format(input_path, output_path=None, target_format='wav'):
-    """Chuyển đổi audio sang định dạng WAV"""
+    """Chuyển đổi audio format"""
     try:
         if output_path is None:
             output_path = input_path.rsplit('.', 1)[0] + f'.{target_format}'
         
-        # Sử dụng pydub để chuyển đổi
         audio = AudioSegment.from_file(input_path)
         audio.export(output_path, format=target_format)
-        logger.info(f"Đã chuyển đổi {input_path} -> {output_path}")
         return output_path
     except Exception as e:
         logger.error(f"Lỗi chuyển đổi audio: {str(e)}")
-        
-        # Fallback: sử dụng ffmpeg
-        try:
-            cmd = ['ffmpeg', '-i', input_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', output_path]
-            subprocess.run(cmd, check=True, capture_output=True)
-            return output_path
-        except Exception as e2:
-            logger.error(f"FFmpeg cũng lỗi: {str(e2)}")
-            return None
-
-def extract_audio_features(audio_path):
-    """Trích xuất đặc trưng từ audio đơn giản"""
-    try:
-        # Load audio với librosa
-        y, sr = librosa.load(audio_path, sr=22050)
-        
-        # Trích xuất các đặc trưng cơ bản
-        features = {
-            'mfcc': librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13).mean(axis=1).tolist(),
-            'chroma': librosa.feature.chroma_stft(y=y, sr=sr).mean(axis=1).tolist(),
-            'mel': librosa.feature.melspectrogram(y=y, sr=sr).mean(axis=1).tolist(),
-            'duration': len(y) / sr,
-            'sr': sr
-        }
-        
-        return features
-    except Exception as e:
-        logger.error(f"Lỗi trích xuất đặc trưng: {str(e)}")
-        
-        # Fallback: tạo embedding giả
-        return {
-            'mfcc': np.random.randn(13).tolist(),
-            'chroma': np.random.randn(12).tolist(),
-            'mel': np.random.randn(128).tolist(),
-            'duration': 1.0,
-            'sr': 22050
-        }
+        return None
 
 @app.route('/')
 def index():
@@ -158,9 +205,18 @@ def voice_clone_page():
     """Trang voice cloning"""
     return render_template('voice_clone.html')
 
+@app.route('/api/available-voices')
+def get_available_voices():
+    """Lấy danh sách các giọng có sẵn"""
+    return jsonify({
+        'success': True,
+        'voices': list(AVAILABLE_VOICES.values()),
+        'total': len(AVAILABLE_VOICES)
+    })
+
 @app.route('/api/extract-voice', methods=['POST'])
 def extract_voice():
-    """Trích xuất giọng nói từ audio"""
+    """Trích xuất giọng nói cho voice cloning (chỉ XTTS v2)"""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'Không có file được chọn'}), 400
@@ -170,142 +226,151 @@ def extract_voice():
             return jsonify({'error': 'Không có file được chọn'}), 400
         
         if not allowed_file(file.filename, 'voice_clone'):
-            return jsonify({'error': 'Định dạng file không được hỗ trợ. Chỉ chấp nhận MP3, WAV, M4A'}), 400
+            return jsonify({'error': 'Định dạng file không được hỗ trợ'}), 400
         
-        # Lưu file tạm
+        # Lưu file
         filename = secure_filename(file.filename)
         unique_filename = f"{uuid.uuid4().hex}_{filename}"
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         file.save(filepath)
         
-        # Chuyển đổi sang WAV nếu cần
-        if not filepath.lower().endswith('.wav'):
-            wav_path = filepath.rsplit('.', 1)[0] + '.wav'
-            converted = convert_audio_format(filepath, wav_path)
-            if converted:
-                # Xóa file gốc
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                filepath = wav_path
-            else:
-                return jsonify({'error': 'Không thể chuyển đổi file audio'}), 500
+        # Chuyển đổi sang WAV
+        wav_path = filepath.rsplit('.', 1)[0] + '.wav'
+        if not convert_audio_format(filepath, wav_path):
+            return jsonify({'error': 'Không thể chuyển đổi audio'}), 500
         
-        # Trích xuất đặc trưng audio
-        features = extract_audio_features(filepath)
+        # Load XTTS v2 model
+        xtts_model = load_tts_model("tts_models/multilingual/multi-dataset/xtts_v2")
+        if not xtts_model:
+            return jsonify({'error': 'Không thể load XTTS v2 model'}), 500
         
-        if features:
-            # Lưu features
-            voice_id = str(uuid.uuid4())
-            features_filename = f"{voice_id}_features.json"
-            features_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], features_filename)
-            
-            with open(features_path, 'w') as f:
-                json.dump(features, f)
-            
-            # Lưu thông tin voice
-            voice_info = {
-                'id': voice_id,
-                'original_filename': filename,
-                'features_file': features_filename,
-                'audio_reference': unique_filename,
-                'created_at': str(os.path.getctime(filepath)),
-                'duration': features['duration']
-            }
-            
-            voice_info_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], f"{voice_id}.json")
-            with open(voice_info_path, 'w') as f:
-                json.dump(voice_info, f)
-            
-            # Di chuyển file audio vào thư mục voices để tham chiếu sau này
-            reference_audio_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], unique_filename)
-            os.rename(filepath, reference_audio_path)
-            
-            logger.info(f"Đã trích xuất giọng: {voice_id}")
-            
-            return jsonify({
-                'success': True,
-                'message': 'Đã trích xuất giọng nói thành công',
-                'voice_id': voice_id,
-                'voice_name': filename,
-                'duration': features['duration']
-            })
-        else:
-            return jsonify({'error': 'Không thể trích xuất đặc trưng từ audio'}), 500
-            
+        # Tạo voice ID
+        voice_id = str(uuid.uuid4())
+        
+        # Lưu audio reference
+        reference_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], f"{voice_id}.wav")
+        os.rename(wav_path, reference_path)
+        
+        # Lưu thông tin voice
+        voice_info = {
+            'id': voice_id,
+            'name': filename.rsplit('.', 1)[0],
+            'filename': f"{voice_id}.wav",
+            'model': 'xtts_v2',
+            'created_at': str(os.path.getctime(reference_path)),
+            'language': 'vi'
+        }
+        
+        with open(os.path.join(app.config['VOICE_CLONE_FOLDER'], f"{voice_id}.json"), 'w') as f:
+            json.dump(voice_info, f)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Đã trích xuất giọng nói thành công',
+            'voice_id': voice_id,
+            'voice_name': voice_info['name']
+        })
+        
     except Exception as e:
-        logger.error(f"Lỗi khi trích xuất giọng nói: {str(e)}", exc_info=True)
+        logger.error(f"Lỗi extract voice: {str(e)}", exc_info=True)
         return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
 
-@app.route('/api/clone-voice', methods=['POST'])
-def clone_voice():
-    """Tạo giọng nói từ text"""
+@app.route('/api/text-to-speech', methods=['POST'])
+def text_to_speech():
+    """Tạo giọng nói từ văn bản với nhiều giọng khác nhau"""
     try:
         data = request.json
         text = data.get('text', '').strip()
-        voice_id = data.get('voice_id', '')
+        voice_id = data.get('voice_id', 'vi_female_vivos')  # Mặc định giọng nữ VIVOS
+        speed = float(data.get('speed', 1.0))
         
         if not text:
             return jsonify({'error': 'Vui lòng nhập văn bản'}), 400
         
-        if not voice_id:
-            return jsonify({'error': 'Vui lòng chọn giọng nói'}), 400
+        # Kiểm tra voice_id
+        if voice_id in AVAILABLE_VOICES:
+            voice_config = AVAILABLE_VOICES[voice_id]
+        else:
+            # Kiểm tra xem có phải cloned voice không
+            voice_json_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], f"{voice_id}.json")
+            if os.path.exists(voice_json_path):
+                with open(voice_json_path, 'r') as f:
+                    voice_config = json.load(f)
+                voice_config['is_cloned'] = True
+            else:
+                voice_config = AVAILABLE_VOICES['vi_female_vivos']  # Fallback
         
-        # Kiểm tra voice có tồn tại không
-        voice_info_path = os.path.join(app.config['VOICE_CLONE_FOLDER'], f"{voice_id}.json")
-        if not os.path.exists(voice_info_path):
-            return jsonify({'error': 'Không tìm thấy giọng nói'}), 404
-        
-        with open(voice_info_path, 'r') as f:
-            voice_info = json.load(f)
-        
-        # Tạo audio từ text
-        output_filename = f"cloned_{voice_id}_{uuid.uuid4().hex}.mp3"
+        # Tạo file output
+        output_filename = f"tts_{voice_id}_{uuid.uuid4().hex}.wav"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
-        # Phương pháp 1: Sử dụng gTTS cho Tiếng Việt
-        try:
-            from gtts import gTTS
+        if voice_config.get('is_cloned'):
+            # Sử dụng cloned voice với XTTS v2
+            model_name = "tts_models/multilingual/multi-dataset/xtts_v2"
+            model = load_tts_model(model_name)
             
-            # Tạo audio với gTTS
-            tts = gTTS(text=text, lang='vi', slow=False)
-            tts.save(output_path)
+            if model:
+                # Sử dụng cloned voice
+                reference_audio = os.path.join(app.config['VOICE_CLONE_FOLDER'], voice_config['filename'])
+                model.tts_to_file(
+                    text=text,
+                    speaker_wav=reference_audio,
+                    language="vi",
+                    file_path=output_path
+                )
+            else:
+                return jsonify({'error': 'Không thể load model voice cloning'}), 500
+        else:
+            # Sử dụng pre-trained model
+            model_name = voice_config['model']
+            model = load_tts_model(model_name)
             
-            logger.info(f"Đã tạo audio với gTTS: {output_filename}")
-            
-        except Exception as gtts_error:
-            logger.error(f"gTTS lỗi: {str(gtts_error)}")
-            
-            # Phương pháp 2: Sử dụng TTS model
-            try:
-                model = load_tts_model()
-                if model != "gtts":
-                    # Sử dụng TTS model
-                    model.tts_to_file(text=text, file_path=output_path)
+            if model:
+                # Xác định language code
+                lang_code = voice_config.get('language', 'vi')
+                
+                if 'xtts' in model_name:
+                    # XTTS model cần speaker_wav
+                    # Sử dụng speaker mặc định
+                    model.tts_to_file(
+                        text=text,
+                        speaker_wav=None,  # Sử dụng giọng mặc định của model
+                        language=lang_code,
+                        file_path=output_path
+                    )
                 else:
-                    # Phương pháp 3: Sử dụng pyttsx3
-                    import pyttsx3
-                    engine = pyttsx3.init()
-                    engine.save_to_file(text, output_path)
-                    engine.runAndWait()
-            except Exception as tts_error:
-                logger.error(f"TTS model lỗi: {str(tts_error)}")
-                return jsonify({'error': 'Không thể tạo giọng nói'}), 500
+                    # Các model khác
+                    model.tts_to_file(text=text, file_path=output_path)
+            else:
+                # Fallback: sử dụng gTTS
+                logger.warning(f"Model {model_name} không khả dụng, sử dụng gTTS")
+                from gtts import gTTS
+                tts = gTTS(text=text, lang='vi')
+                tts.save(output_path)
+        
+        # Convert to MP3 nếu cần
+        mp3_path = output_path.rsplit('.', 1)[0] + '.mp3'
+        if convert_audio_format(output_path, mp3_path, 'mp3'):
+            os.remove(output_path)  # Xóa file WAV gốc
+            output_path = mp3_path
+            output_filename = os.path.basename(mp3_path)
         
         return jsonify({
             'success': True,
             'message': 'Đã tạo giọng nói thành công',
             'audio_url': f'/api/download/{output_filename}',
+            'voice_name': voice_config.get('name', 'Unknown'),
             'text': text,
-            'voice_name': voice_info.get('original_filename', 'Unknown')
+            'voice_id': voice_id
         })
-            
+        
     except Exception as e:
-        logger.error(f"Lỗi trong quá trình clone voice: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
+        logger.error(f"Lỗi TTS: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Lỗi tạo giọng nói: {str(e)}'}), 500
 
 @app.route('/api/speech-to-text', methods=['POST'])
 def speech_to_text():
-    """Chuyển đổi speech to text"""
+    """Chuyển speech to text"""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'Không có file được chọn'}), 400
@@ -319,26 +384,23 @@ def speech_to_text():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
-        # Chuyển đổi sang WAV nếu cần
-        if not filepath.lower().endswith('.wav'):
-            wav_path = filepath.rsplit('.', 1)[0] + '.wav'
-            converted = convert_audio_format(filepath, wav_path)
-            if converted:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                filepath = wav_path
+        # Chuyển đổi sang WAV
+        wav_path = filepath.rsplit('.', 1)[0] + '.wav'
+        if not convert_audio_format(filepath, wav_path):
+            return jsonify({'error': 'Không thể chuyển đổi audio'}), 500
         
         # Load whisper model
         model = load_whisper_model()
-        if model is None:
-            return jsonify({'error': 'Whisper model chưa sẵn sàng'}), 500
+        if not model:
+            return jsonify({'error': 'Whisper model không khả dụng'}), 500
         
-        # Chuyển đổi speech to text
-        result = model.transcribe(filepath, language="vi")
+        # Transcribe
+        result = model.transcribe(wav_path, language="vi")
         
-        # Dọn dẹp file tạm
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        # Dọn dẹp
+        for f in [filepath, wav_path]:
+            if os.path.exists(f):
+                os.remove(f)
         
         return jsonify({
             'success': True,
@@ -347,51 +409,94 @@ def speech_to_text():
         })
         
     except Exception as e:
-        logger.error(f"Lỗi speech to text: {str(e)}", exc_info=True)
-        return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
+        logger.error(f"Lỗi STT: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Lỗi chuyển đổi: {str(e)}'}), 500
 
-@app.route('/api/text-to-speech', methods=['POST'])
-def text_to_speech():
-    """Chuyển đổi text to speech"""
+@app.route('/api/voices')
+def list_voices():
+    """Danh sách các giọng (bao gồm cloned)"""
     try:
-        data = request.json
-        text = data.get('text', '').strip()
+        voices = []
         
-        if not text:
-            return jsonify({'error': 'Vui lòng nhập văn bản'}), 400
+        # Thêm các pre-trained voices
+        for voice_id, voice_info in AVAILABLE_VOICES.items():
+            voices.append({
+                'id': voice_id,
+                'name': voice_info['name'],
+                'type': 'pre-trained',
+                'language': voice_info.get('language', 'vi'),
+                'gender': voice_info.get('gender', 'unknown'),
+                'description': voice_info.get('description', '')
+            })
         
-        # Tạo file output
-        output_filename = f"tts_{uuid.uuid4().hex}.mp3"
-        output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
-        
-        # Sử dụng gTTS cho Tiếng Việt
-        try:
-            from gtts import gTTS
-            tts = gTTS(text=text, lang='vi')
-            tts.save(output_path)
-        except Exception as e:
-            logger.error(f"gTTS lỗi: {str(e)}")
-            
-            # Fallback: sử dụng pyttsx3
-            try:
-                import pyttsx3
-                engine = pyttsx3.init()
-                engine.save_to_file(text, output_path)
-                engine.runAndWait()
-            except Exception as e2:
-                logger.error(f"pyttsx3 lỗi: {str(e2)}")
-                return jsonify({'error': 'Không thể tạo audio'}), 500
+        # Thêm cloned voices
+        voices_dir = app.config['VOICE_CLONE_FOLDER']
+        if os.path.exists(voices_dir):
+            for file in os.listdir(voices_dir):
+                if file.endswith('.json'):
+                    with open(os.path.join(voices_dir, file), 'r') as f:
+                        voice_info = json.load(f)
+                        voices.append({
+                            'id': voice_info['id'],
+                            'name': f"Cloned: {voice_info['name']}",
+                            'type': 'cloned',
+                            'language': voice_info.get('language', 'vi'),
+                            'gender': 'custom',
+                            'description': 'Giọng đã clone từ audio mẫu'
+                        })
         
         return jsonify({
             'success': True,
-            'message': 'Đã tạo audio thành công',
-            'audio_url': f'/api/download/{output_filename}',
-            'text': text
+            'voices': voices,
+            'total': len(voices)
         })
         
     except Exception as e:
-        logger.error(f"Lỗi text to speech: {str(e)}", exc_info=True)
+        logger.error(f"Lỗi list voices: {str(e)}")
         return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
+
+@app.route('/api/test-voice/<voice_id>', methods=['GET'])
+def test_voice(voice_id):
+    """Test giọng nói với văn bản mẫu"""
+    test_text = "Xin chào! Tôi là giọng nói nhân tạo. Rất vui được gặp bạn."
+    
+    try:
+        if voice_id in AVAILABLE_VOICES:
+            voice_config = AVAILABLE_VOICES[voice_id]
+        else:
+            return jsonify({'error': 'Giọng không tồn tại'}), 404
+        
+        output_filename = f"test_{voice_id}_{uuid.uuid4().hex}.mp3"
+        output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+        
+        model_name = voice_config['model']
+        model = load_tts_model(model_name)
+        
+        if model:
+            if 'xtts' in model_name:
+                model.tts_to_file(
+                    text=test_text,
+                    speaker_wav=None,
+                    language=voice_config.get('language', 'vi'),
+                    file_path=output_path
+                )
+            else:
+                model.tts_to_file(text=test_text, file_path=output_path)
+        else:
+            from gtts import gTTS
+            tts = gTTS(text=test_text, lang='vi')
+            tts.save(output_path)
+        
+        return jsonify({
+            'success': True,
+            'audio_url': f'/api/download/{output_filename}',
+            'voice_name': voice_config['name'],
+            'text': test_text
+        })
+        
+    except Exception as e:
+        logger.error(f"Lỗi test voice: {str(e)}")
+        return jsonify({'error': f'Lỗi test: {str(e)}'}), 500
 
 @app.route('/api/download/<filename>')
 def download_file(filename):
@@ -404,203 +509,83 @@ def download_file(filename):
             download_name=filename
         )
     except Exception as e:
-        logger.error(f"Lỗi khi download file: {str(e)}")
+        logger.error(f"Lỗi download: {str(e)}")
         return jsonify({'error': 'File không tồn tại'}), 404
-
-@app.route('/api/voices')
-def list_voices():
-    """Danh sách các giọng nói đã lưu"""
-    try:
-        voices = []
-        voices_dir = app.config['VOICE_CLONE_FOLDER']
-        
-        if os.path.exists(voices_dir):
-            for file in os.listdir(voices_dir):
-                if file.endswith('.json') and not file.endswith('_features.json'):
-                    with open(os.path.join(voices_dir, file), 'r') as f:
-                        voice_info = json.load(f)
-                        voices.append({
-                            'id': voice_info['id'],
-                            'name': voice_info.get('original_filename', 'Unknown'),
-                            'created_at': voice_info.get('created_at', ''),
-                            'duration': voice_info.get('duration', 0)
-                        })
-        
-        return jsonify({
-            'success': True,
-            'voices': sorted(voices, key=lambda x: x.get('created_at', ''), reverse=True)
-        })
-        
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy danh sách voices: {str(e)}")
-        return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
-
-@app.route('/api/delete-voice/<voice_id>', methods=['DELETE'])
-def delete_voice(voice_id):
-    """Xóa giọng nói"""
-    try:
-        voices_dir = app.config['VOICE_CLONE_FOLDER']
-        voice_info_path = os.path.join(voices_dir, f"{voice_id}.json")
-        
-        if not os.path.exists(voice_info_path):
-            return jsonify({'error': 'Không tìm thấy giọng nói'}), 404
-        
-        # Đọc thông tin voice
-        with open(voice_info_path, 'r') as f:
-            voice_info = json.load(f)
-        
-        # Xóa các file liên quan
-        files_to_delete = [
-            voice_info_path,
-            os.path.join(voices_dir, voice_info.get('features_file', '')),
-            os.path.join(voices_dir, voice_info.get('audio_reference', ''))
-        ]
-        
-        for file_path in files_to_delete:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                logger.info(f"Đã xóa: {file_path}")
-        
-        return jsonify({
-            'success': True,
-            'message': 'Đã xóa giọng nói thành công'
-        })
-        
-    except Exception as e:
-        logger.error(f"Lỗi khi xóa voice: {str(e)}")
-        return jsonify({'error': f'Lỗi server: {str(e)}'}), 500
 
 @app.route('/api/health')
 def health_check():
-    """Health check endpoint"""
+    """Health check"""
     device = get_device()
     
     # Kiểm tra models
-    tts_status = "gtts" if tts_model == "gtts" else (tts_model is not None)
-    whisper_status = whisper_model is not None
+    models_loaded = {
+        'whisper': whisper_model is not None,
+        'tts_models_loaded': len(tts_models),
+        'device': device
+    }
+    
+    # Danh sách models đã load
+    loaded_model_names = list(tts_models.keys())
     
     return jsonify({
         'status': 'healthy',
-        'service': 'voice-cloning-api',
-        'models': {
-            'tts': str(tts_status),
-            'whisper': whisper_status,
-            'device': device
-        },
-        'storage': {
-            'voices': len(os.listdir(app.config['VOICE_CLONE_FOLDER'])) if os.path.exists(app.config['VOICE_CLONE_FOLDER']) else 0,
-            'outputs': len(os.listdir(app.config['OUTPUT_FOLDER'])) if os.path.exists(app.config['OUTPUT_FOLDER']) else 0
-        },
-        'timestamp': str(os.path.getmtime(__file__) if os.path.exists(__file__) else 'unknown')
+        'service': 'multi-voice-tts-api',
+        'models': models_loaded,
+        'loaded_models': loaded_model_names,
+        'available_voices': len(AVAILABLE_VOICES),
+        'timestamp': str(os.path.getmtime(__file__))
     })
 
-@app.route('/api/test-tts', methods=['POST'])
-def test_tts():
-    """Test TTS với text mẫu"""
+@app.route('/api/preload-models', methods=['POST'])
+def preload_models():
+    """Preload tất cả models"""
     try:
-        data = request.json
-        text = data.get('text', 'Xin chào, đây là giọng nói thử nghiệm.')
-        
-        output_filename = f"test_{uuid.uuid4().hex}.mp3"
-        output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
-        
-        # Sử dụng gTTS
-        from gtts import gTTS
-        tts = gTTS(text=text, lang='vi')
-        tts.save(output_path)
+        loaded = load_all_tts_models()
+        load_whisper_model()
         
         return jsonify({
             'success': True,
-            'message': 'Test TTS thành công',
-            'audio_url': f'/api/download/{output_filename}',
-            'text': text
+            'message': f'Đã load {len(loaded)} models',
+            'models_loaded': list(loaded.keys())
         })
-        
     except Exception as e:
-        logger.error(f"Lỗi test TTS: {str(e)}")
-        return jsonify({'error': f'Lỗi test TTS: {str(e)}'}), 500
+        logger.error(f"Lỗi preload: {str(e)}")
+        return jsonify({'error': f'Lỗi preload: {str(e)}'}), 500
 
-# Middleware để dọn dẹp file cũ
+# Cleanup old files
 @app.before_request
-def cleanup_old_files():
-    """Dọn dẹp file tạm cũ"""
+def cleanup():
     import time
     import glob
     
     try:
         current_time = time.time()
+        max_age = 3600  # 1 giờ
         
-        # Xóa file trong temp folder cũ hơn 1 giờ
         for folder in [app.config['UPLOAD_FOLDER'], app.config['OUTPUT_FOLDER']]:
             if os.path.exists(folder):
                 for filepath in glob.glob(os.path.join(folder, '*')):
                     try:
-                        if os.path.getmtime(filepath) < current_time - 3600:  # 1 giờ
+                        if os.path.getmtime(filepath) < current_time - max_age:
                             os.remove(filepath)
-                            logger.debug(f"Đã xóa file cũ: {filepath}")
-                    except Exception as e:
-                        logger.error(f"Lỗi khi xóa file {filepath}: {e}")
-    except Exception as e:
-        logger.error(f"Lỗi cleanup: {e}")
+                    except:
+                        pass
+    except:
+        pass
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     
-    # Pre-load models khi start
+    # Preload models nếu được cấu hình
     if os.environ.get('PRELOAD_MODELS', 'false').lower() == 'true':
-        logger.info("Đang pre-load models...")
-        load_tts_model()
+        logger.info("Preloading models...")
+        load_all_tts_models()
         load_whisper_model()
     
-    # Kiểm tra và tạo thư mục
-    for folder in ['templates', 'static', app.config['UPLOAD_FOLDER'], 
-                   app.config['OUTPUT_FOLDER'], app.config['VOICE_CLONE_FOLDER']]:
-        if not os.path.exists(folder):
-            os.makedirs(folder, exist_ok=True)
-    
-    # Tạo file index.html mặc định nếu không tồn tại
-    if not os.path.exists('templates/index.html'):
+    # Đảm bảo có templates
+    if not os.path.exists('templates'):
         os.makedirs('templates', exist_ok=True)
-        with open('templates/index.html', 'w') as f:
-            f.write('''<!DOCTYPE html>
-<html>
-<head>
-    <title>Voice Cloning API</title>
-    <style>
-        body { font-family: Arial; padding: 20px; text-align: center; }
-        .btn { padding: 10px 20px; margin: 10px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; }
-    </style>
-</head>
-<body>
-    <h1>Voice Cloning API</h1>
-    <p>API đang hoạt động!</p>
-    <a href="/voice-clone" class="btn">Voice Cloning Demo</a>
-    <a href="/api/health" class="btn">Health Check</a>
-</body>
-</html>''')
     
-    # Tạo file voice_clone.html mặc định nếu không tồn tại
-    if not os.path.exists('templates/voice_clone.html'):
-        with open('templates/voice_clone.html', 'w') as f:
-            f.write('''<!DOCTYPE html>
-<html>
-<head>
-    <title>Voice Cloning Demo</title>
-    <style>
-        body { font-family: Arial; padding: 20px; }
-        .tab { padding: 10px; cursor: pointer; }
-        .tab-content { display: none; padding: 20px; }
-        .active { display: block; }
-    </style>
-</head>
-<body>
-    <h1>Voice Cloning Demo</h1>
-    <p>File template đang được tạo...</p>
-    <a href="/">Quay lại</a>
-</body>
-</html>''')
-    
-    logger.info(f"Starting server on port {port}")
     app.run(
         host='0.0.0.0',
         port=port,
